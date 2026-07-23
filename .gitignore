@@ -181,3 +181,38 @@ wandb/
 swanlog/
 generated_predictions.jsonl
 predictions_score.json
+
+# ML model weights and checkpoints
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.ggml
+
+# Hugging Face / model caches
+.cache/
+.cache/huggingface/
+.cache/modelscope/
+.tokenizer_cache/
+
+# Training artifacts
+checkpoint-*/
+adapter_*/
+merged/
+
+# IDE / editor
+.codegraph/
+.cursor/
+.qwen/
+.spec-workflow/
+
+# NMR data cache
+data/.nmr_whole_multistyle_cache/
+
+# Logs
+tensorboard/
+runs/
+lightning_logs/

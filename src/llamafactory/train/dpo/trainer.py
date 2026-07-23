@@ -29,10 +29,36 @@ from trl.models.utils import prepare_deepspeed, prepare_fsdp
 from trl.trainer import disable_dropout_in_model
 from typing_extensions import override
 
+try:
+    from liger_kernel.chunked_loss import LigerFusedLinearDPOLoss
+except ImportError:
+    LigerFusedLinearDPOLoss = None
+
 from ...extras.constants import IGNORE_INDEX
 from ...extras.packages import is_transformers_version_greater_than
 from ..callbacks import SaveProcessorCallback
-from ..trainer_utils import create_custom_optimizer, create_custom_scheduler, get_batch_logps, nested_detach
+from ..trainer_utils import create_custom_optimizer, create_custom_scheduler, nested_detach
+
+
+def get_batch_logps_memory_efficient(
+    logits: "torch.Tensor", labels: "torch.Tensor", label_pad_token_id: int = IGNORE_INDEX
+) -> tuple["torch.Tensor", "torch.Tensor"]:
+    r"""Compute label log probabilities without materializing full-vocabulary log-softmax."""
+    labels = labels[:, 1:].clone()
+    logits = logits[:, :-1, :]
+    loss_mask = labels != label_pad_token_id
+    labels[~loss_mask] = 0
+    chunk_size = 64
+    logps = []
+    for start in range(0, logits.size(1), chunk_size):
+        end = min(start + chunk_size, logits.size(1))
+        chunk = logits[:, start:end, :].float()
+        chunk_labels = labels[:, start:end]
+        target_logits = torch.gather(chunk, dim=2, index=chunk_labels.unsqueeze(2)).squeeze(2)
+        logps.append(target_logits - torch.logsumexp(chunk, dim=-1))
+    per_token_logps = torch.cat(logps, dim=1)
+    valid_length = loss_mask.sum(-1)
+    return (per_token_logps * loss_mask).sum(-1), valid_length
 
 
 if TYPE_CHECKING:
@@ -71,6 +97,11 @@ class CustomDPOTrainer(DPOTrainer):
         self._precomputed_train_ref_log_probs = False
         self._precomputed_eval_ref_log_probs = False
         self._peft_has_been_casted_to_bf16 = False
+        self.max_length = None
+        self.truncation_mode = "keep_end"
+        self.use_logits_to_keep = False
+        self.padding_free = False
+        self.aux_loss_enabled = False
 
         self.ref_model = ref_model
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
@@ -86,6 +117,17 @@ class CustomDPOTrainer(DPOTrainer):
 
         Trainer.__init__(self, model=model, **kwargs)
         self.model_accepts_loss_kwargs = False  # overwrite trainer's default behavior
+        if self.args.use_liger_loss:
+            if LigerFusedLinearDPOLoss is None:
+                raise ImportError("Install liger-kernel to use Liger fused DPO loss.")
+            self.dpo_loss_fn = LigerFusedLinearDPOLoss(
+                ignore_index=self.label_pad_token_id,
+                beta=self.beta,
+                compute_nll_loss=self.ftx_gamma > 1e-6,
+                use_ref_model=self.finetuning_args.use_ref_model,
+                average_log_prob=False,
+                loss_type=self.loss_type,
+            )
         if not hasattr(self, "accelerator"):
             raise AttributeError("Please update `transformers`.")
 
@@ -227,10 +269,10 @@ class CustomDPOTrainer(DPOTrainer):
             batch = nested_detach(batch, clone=True)  # avoid error
 
         labels = batch.pop("labels")  # dpo do not need compute loss in forward
-        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
-        all_logps, valid_length = get_batch_logps(
-            logits=all_logits, labels=labels, ld_alpha=(self.ld_alpha if not is_ref_model else None)
-        )
+        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits
+        if self.ld_alpha is not None and not is_ref_model:
+            raise NotImplementedError("Memory-efficient DPO log-probs do not support LD-DPO.")
+        all_logps, valid_length = get_batch_logps_memory_efficient(logits=all_logits, labels=labels)
         if self.loss_type in ["ipo", "orpo", "simpo"]:
             all_logps = all_logps / valid_length
 
@@ -273,6 +315,44 @@ class CustomDPOTrainer(DPOTrainer):
 
         return reference_chosen_logps, reference_rejected_logps
 
+    def fused_liger_forward(
+        self, model: "PreTrainedModel", batch: dict[str, "torch.Tensor"]
+    ) -> dict[str, "torch.Tensor"]:
+        r"""Compute DPO loss from hidden states without materializing full vocabulary logits."""
+        batch = nested_detach(batch, clone=True)
+        labels = batch.pop("labels")[:, 1:]
+        unwrapped_model = self.accelerator.unwrap_model(model)
+        base_model = unwrapped_model.get_decoder()
+        outputs = base_model(**batch, return_dict=True, use_cache=False)
+        hidden_states = outputs.last_hidden_state[:, :-1]
+
+        ref_hidden_states = None
+        if self.finetuning_args.use_ref_model:
+            with torch.no_grad(), unwrapped_model.disable_adapter():
+                ref_outputs = base_model(**batch, return_dict=True, use_cache=False)
+                ref_hidden_states = ref_outputs.last_hidden_state[:, :-1]
+
+        lm_head = unwrapped_model.get_output_embeddings()
+        loss, outputs = self.dpo_loss_fn(
+            lm_head.weight,
+            hidden_states,
+            labels,
+            bias=lm_head.bias if hasattr(lm_head, "bias") else None,
+            ref_input=ref_hidden_states,
+            ref_weight=lm_head.weight if ref_hidden_states is not None else None,
+            ref_bias=lm_head.bias if ref_hidden_states is not None and hasattr(lm_head, "bias") else None,
+        )
+        chosen_logps, rejected_logps, chosen_logits, rejected_logits, _, chosen_rewards, rejected_rewards = outputs
+        return {
+            "loss": loss,
+            "chosen_logps": chosen_logps,
+            "rejected_logps": rejected_logps,
+            "chosen_logits": chosen_logits,
+            "rejected_logits": rejected_logits,
+            "chosen_rewards": chosen_rewards,
+            "rejected_rewards": rejected_rewards,
+        }
+
     @override
     def get_batch_loss_metrics(
         self,
@@ -283,6 +363,23 @@ class CustomDPOTrainer(DPOTrainer):
         r"""Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
         metrics = {}
 
+        if self.args.use_liger_loss:
+            model_output = self.fused_liger_forward(model, batch)
+            losses = model_output["loss"]
+            chosen_rewards = model_output["chosen_rewards"]
+            rejected_rewards = model_output["rejected_rewards"]
+            prefix = "eval_" if train_eval == "eval" else ""
+            metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().item()
+            metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().item()
+            metrics[f"{prefix}rewards/accuracies"] = (chosen_rewards > rejected_rewards).float().mean().item()
+            metrics[f"{prefix}rewards/margins"] = (chosen_rewards - rejected_rewards).mean().item()
+            metrics[f"{prefix}logps/chosen"] = model_output["chosen_logps"].mean().item()
+            metrics[f"{prefix}logps/rejected"] = model_output["rejected_logps"].mean().item()
+            metrics[f"{prefix}logits/chosen"] = model_output["chosen_logits"].mean().item()
+            metrics[f"{prefix}logits/rejected"] = model_output["rejected_logits"].mean().item()
+            return losses.mean(), metrics
+
+        reference_chosen_logps, reference_rejected_logps = self.compute_reference_log_probs(model, batch)
         model_output = self.concatenated_forward(model, batch)
         policy_chosen_logps = model_output["chosen_logps"]
         policy_rejected_logps = model_output["rejected_logps"]
@@ -290,7 +387,6 @@ class CustomDPOTrainer(DPOTrainer):
         policy_rejected_logits = model_output["rejected_logits"]
         policy_chosen_logps_avg = model_output["chosen_logps_avg"]
 
-        reference_chosen_logps, reference_rejected_logps = self.compute_reference_log_probs(model, batch)
         losses, chosen_rewards, rejected_rewards = self.compute_preference_loss(
             policy_chosen_logps,
             policy_rejected_logps,
