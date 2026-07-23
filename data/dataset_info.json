@@ -738,5 +738,90 @@
       "prompt": "content"
     },
     "folder": "python"
+  },
+  "nmr_pulse_program": {
+    "file_name": "nmr_pulse_program.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "nmr_pulse_program_dpo_smoke": {
+    "file_name": "nmr_pulse_program_dpo_smoke.jsonl",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
+  },
+  "nmr_line": {
+    "file_name": "nmr_line.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "response": "output"
+    }
+  },
+  "nmr_block_high_confidence": {
+    "file_name": "nmr_block_high_confidence.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "nmr_whole_extended": {
+    "file_name": "nmr_whole_extended.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "nmr_whole_multistyle_train": {
+    "file_name": "nmr_whole_multistyle_train.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "nmr_whole_multistyle_eval": {
+    "file_name": "nmr_whole_multistyle_eval.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "nmr_pulse_program_dpo": {
+    "file_name": "nmr_pulse_program_dpo.jsonl",
+    "formatting": "alpaca",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
+  },
+  "nmr_pulse_program_dpo_5120": {
+    "file_name": "nmr_pulse_program_dpo_5120.jsonl",
+    "formatting": "alpaca",
+    "ranking": true,
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "chosen": "chosen",
+      "rejected": "rejected"
+    }
   }
 }

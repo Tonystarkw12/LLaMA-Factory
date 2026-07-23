@@ -94,6 +94,10 @@ class TrainingArguments(Fp8Arguments, RayArguments, BaseTrainingArguments):
         default=False,
         metadata={"help": "deprecated"},
     )
+    use_liger_loss: bool = field(
+        default=False,
+        metadata={"help": "Use Liger fused preference loss to avoid materializing full vocabulary logits."},
+    )
 
     def __post_init__(self):
         RayArguments.__post_init__(self)
